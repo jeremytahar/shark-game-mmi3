@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo, forwardRef } from 'react'
+import { useRef, useEffect, useMemo, useState, forwardRef } from 'react'
 import { useGLTF, useAnimations, useKeyboardControls } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
@@ -29,38 +29,117 @@ export const Shark = forwardRef<THREE.Group, React.ComponentProps<'group'>>((pro
 
     useMemo(() => {
         animations.forEach((clip) => {
-            if (clip.name.includes('Idle')) clip.name = 'Repos'
-            if (clip.name.includes('Walk')) clip.name = 'Walk'
+            const name = clip.name
+            if (name.includes('Death')) clip.name = 'Mort'
+            else if (name.includes('Run')) clip.name = 'Courir'
+            else if (name.includes('Walk')) clip.name = 'Marcher'
+            else if (name.includes('Jump_Idle')) clip.name = 'Sauter'
+            else if (name.includes('Idle')) clip.name = 'Repos'
+            else if (name.includes('Sword')) clip.name = 'Attaquer'
         })
+        console.log(animations.map((clip) => clip.name))
     }, [animations])
 
-    const { actions } = useAnimations(animations, group)
-    const currentAnimationRef = useRef<string>('Repos')
+    const { actions, mixer } = useAnimations(animations, group)
+    const [animation, setAnimation] = useState('Repos')
+    const previousAnimationRef = useRef<string>('Repos')
+    const isAttacking = useRef(false)
+
+    const yVelocity = useRef(0)
+    const isJumping = useRef(false)
+    const gravity = -20
+    const jumpForce = 8
 
     const [, get] = useKeyboardControls()
 
     useEffect(() => {
-        const idleAction = actions['Repos']
-        if (idleAction) {
-            idleAction.reset().fadeIn(0.3).play()
+        const handleClick = () => {
+            isAttacking.current = true
+            setAnimation('Attaquer')
         }
-    }, [actions])
+        window.addEventListener('pointerdown', handleClick)
+        return () => window.removeEventListener('pointerdown', handleClick)
+    }, [])
 
-    useFrame(() => {
-        const { forward, back, left, right } = get()
+    useEffect(() => {
+        const onFinished = (e: THREE.Event) => {
+            const event = e as unknown as { action: THREE.AnimationAction }
+            if (event.action === actions['Attaquer']) {
+                isAttacking.current = false
+            }
+        }
+        mixer.addEventListener('finished', onFinished)
+        return () => mixer.removeEventListener('finished', onFinished)
+    }, [mixer, actions])
+
+    useFrame((_state, delta) => {
+        const { forward, back, left, right, jump, attack } = get()
         const isMoving = forward || back || left || right
-        const targetAnimation = isMoving ? 'Walk' : 'Repos'
 
-        if (currentAnimationRef.current !== targetAnimation) {
-            const prevAction = actions[currentAnimationRef.current]
-            const nextAction = actions[targetAnimation]
+        if (jump && !isJumping.current) {
+            yVelocity.current = jumpForce
+            isJumping.current = true
+        }
 
-            if (prevAction) prevAction.fadeOut(0.3)
-            if (nextAction) nextAction.reset().fadeIn(0.3).play()
+        if (attack && !isAttacking.current) {
+            isAttacking.current = true
+            setAnimation('Attaquer')
+        }
 
-            currentAnimationRef.current = targetAnimation
+        if (isJumping.current) {
+            yVelocity.current += gravity * delta
+            group.current.position.y += yVelocity.current * delta
+
+            if (group.current.position.y <= 0) {
+                group.current.position.y = 0
+                yVelocity.current = 0
+                isJumping.current = false
+            }
+        }
+
+        if (!isAttacking.current) {
+            let targetAnimation = 'Repos'
+
+            if (isJumping.current) {
+                targetAnimation = 'Sauter'
+            } else if (isMoving) {
+                targetAnimation = 'Marcher'
+            }
+
+            if (animation !== targetAnimation) {
+                setAnimation(targetAnimation)
+            }
         }
     })
+
+    useEffect(() => {
+        Object.entries(actions).forEach(([name, action]) => {
+            if (!action) return
+            if (name === 'Sauter' || name === 'Attaquer') {
+                action.setLoop(THREE.LoopOnce, 1)
+                action.clampWhenFinished = true
+            } else {
+                action.setLoop(THREE.LoopRepeat, Infinity)
+                action.clampWhenFinished = false
+            }
+        })
+    }, [actions])
+
+    useEffect(() => {
+        const action = actions[animation]
+        const previousAction = actions[previousAnimationRef.current]
+
+        if (!action) return
+
+        action.reset().setEffectiveTimeScale(1).setEffectiveWeight(1)
+
+        if (previousAction && previousAction !== action) {
+            action.crossFadeFrom(previousAction, 0.2, true)
+        }
+
+        action.play()
+        previousAnimationRef.current = animation
+    }, [animation, actions])
 
     return (
         <group ref={group} {...props} dispose={null}>

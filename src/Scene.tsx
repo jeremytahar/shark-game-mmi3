@@ -1,74 +1,149 @@
-import { Environment, OrbitControls, Plane, useKeyboardControls } from '@react-three/drei';
-import { useRef } from 'react';
+import { Environment, Plane, useKeyboardControls } from '@react-three/drei';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { Perf } from 'r3f-perf';
 import { Shark } from './components/Shark';
+import { Crab } from './components/Crab';
 import { useFrame } from '@react-three/fiber';
 
-export function Scene() {
-    const directionalLightRef = useRef<THREE.DirectionalLight>(null!);
-    const sharkRef = useRef<THREE.Group>(null!);
-    const [, get] = useKeyboardControls();
+const CRABS: [number, number, number][] = [
+    [-8, 0.1, -8],
+    [8, 0.1, -8],
+    [-8, 0.1, 8],
+    [8, 0.1, 8],
+    [0, 0.1, -7],
+    [-6, 0.1, 2],
+    [6, 0.1, 2],
+]
 
-    // Vecteurs pour les calculs de rotation
-    const rotationAxis = new THREE.Vector3(0, 1, 0);
-    const targetQuaternion = new THREE.Quaternion();
+const ATTACK_RANGE = 1.5
+const ATTACK_DELAY = 500
+const CAMERA_DISTANCE = 7
+const CAMERA_HEIGHT = 4
+const MOUSE_SENSITIVITY = 0.003
 
+type SceneProps = {
+    onDefeat: (count: number) => void
+}
+
+export function Scene({ onDefeat }: SceneProps) {
+    const directionalLightRef = useRef<THREE.DirectionalLight>(null!)
+    const sharkRef = useRef<THREE.Group>(null!)
+    const [, get] = useKeyboardControls()
+
+    const planeSize = 20
+    const boundaryLimit = planeSize / 2
+
+    const [defeatedCrabs, setDefeatedCrabs] = useState<Set<number>>(new Set())
+
+    const yaw = useRef(0)
+    const pitch = useRef(-0.3)
+
+    useEffect(() => {
+        const canvas = document.querySelector('canvas')
+        if (!canvas) return
+
+        const handleClick = () => {
+            canvas.requestPointerLock()
+        }
+
+        const handleMouseMove = (e: MouseEvent) => {
+            if (document.pointerLockElement !== canvas) return
+            yaw.current -= e.movementX * MOUSE_SENSITIVITY
+            pitch.current += e.movementY * MOUSE_SENSITIVITY
+            pitch.current = THREE.MathUtils.clamp(pitch.current, -0.6, 0.8)
+        }
+
+        canvas.addEventListener('click', handleClick)
+        window.addEventListener('mousemove', handleMouseMove)
+        return () => {
+            canvas.removeEventListener('click', handleClick)
+            window.removeEventListener('mousemove', handleMouseMove)
+        }
+    }, [])
+
+    const defeatNearbyCrab = useCallback(() => {
+        if (!sharkRef.current) return
+        const sharkPos = sharkRef.current.position
+
+        CRABS.forEach((position, index) => {
+            setDefeatedCrabs((prev) => {
+                if (prev.has(index)) return prev
+                const dx = sharkPos.x - position[0]
+                const dz = sharkPos.z - position[2]
+                if (Math.sqrt(dx * dx + dz * dz) <= ATTACK_RANGE) {
+                    const next = new Set(prev)
+                    next.add(index)
+                    onDefeat(next.size)
+                    return next
+                }
+                return prev
+            })
+        })
+    }, [onDefeat])
+
+    useEffect(() => {
+        const handlePointerDown = () => {
+            setTimeout(defeatNearbyCrab, ATTACK_DELAY)
+        }
+        window.addEventListener('pointerdown', handlePointerDown)
+        return () => window.removeEventListener('pointerdown', handlePointerDown)
+    }, [defeatNearbyCrab])
 
     useFrame((state, delta) => {
-        const { forward, back, left, right } = get();
-        const isMoving = forward || back || left || right;
-        const speed = 5 * delta;
+        const { forward, back, left, right } = get()
+        const speed = 5 * delta
 
         if (sharkRef.current) {
-            // 1. DÉPLACEMENT (Translation)
-            // On déplace le groupe dans le monde
-            if (forward) sharkRef.current.position.z -= speed;
-            if (back) sharkRef.current.position.z += speed;
-            if (left) sharkRef.current.position.x -= speed;
-            if (right) sharkRef.current.position.x += speed;
+            const moveDir = new THREE.Vector3()
 
-            // 2. ANTI-VOL (Gravité forcée)
-            // On force le requin à rester au sol à chaque frame
-            sharkRef.current.position.y = 0;
+            if (forward) moveDir.z -= 1
+            if (back) moveDir.z += 1
+            if (left) moveDir.x -= 1
+            if (right) moveDir.x += 1
 
-            // 3. ROTATION FLUIDE (Quaternion Slerp)
-            if (isMoving) {
-                // Calcul de l'angle cible en fonction des touches
-                let angle = 0;
+            if (moveDir.length() > 0) {
+                moveDir.normalize()
+                moveDir.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw.current)
 
-                // On détermine l'angle vers lequel regarder
-                if (forward) angle = Math.PI; // Dos à la caméra (vers -Z)
-                if (back) angle = 0;       // Face à la caméra (vers +Z)
-                if (left) angle = -Math.PI / 2;
-                if (right) angle = Math.PI / 2;
+                sharkRef.current.position.x += moveDir.x * speed
+                sharkRef.current.position.z += moveDir.z * speed
 
-                // Gestion des diagonales pour une orientation précise
-                if (forward && left) angle = -Math.PI * 0.75;
-                if (forward && right) angle = Math.PI * 0.75;
-                if (back && left) angle = -Math.PI * 0.25;
-                if (back && right) angle = Math.PI * 0.25;
-
-                // On prépare la rotation cible
-                targetQuaternion.setFromAxisAngle(rotationAxis, angle);
-
-                // On tourne doucement le requin vers la cible (Slerp)
-                sharkRef.current.quaternion.slerp(targetQuaternion, 10 * delta);
+                const targetAngle = Math.atan2(moveDir.x, moveDir.z)
+                const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), targetAngle)
+                sharkRef.current.quaternion.slerp(targetQuat, 10 * delta)
             }
+
+            sharkRef.current.position.x = THREE.MathUtils.clamp(sharkRef.current.position.x, -boundaryLimit, boundaryLimit)
+            sharkRef.current.position.z = THREE.MathUtils.clamp(sharkRef.current.position.z, -boundaryLimit, boundaryLimit)
+            sharkRef.current.position.y = 0
+
+            const sharkPos = sharkRef.current.position
+
+            const camX = sharkPos.x + CAMERA_DISTANCE * Math.sin(yaw.current) * Math.cos(pitch.current)
+            const camY = sharkPos.y + CAMERA_HEIGHT + CAMERA_DISTANCE * Math.sin(pitch.current)
+            const camZ = sharkPos.z + CAMERA_DISTANCE * Math.cos(yaw.current) * Math.cos(pitch.current)
+
+            state.camera.position.set(camX, camY, camZ)
+            state.camera.lookAt(sharkPos)
         }
-    });
+    })
 
     return (
         <>
-            <Perf position="top-left" />
-            <OrbitControls />
             <Environment files="sky.jpg" background />
 
-            {/* On passe la ref pour que la Scène puisse contrôler le Requin */}
             <Shark ref={sharkRef} />
 
+            {CRABS.map((position, index) => (
+                <Crab
+                    key={index}
+                    position={position}
+                    isBroken={defeatedCrabs.has(index)}
+                />
+            ))}
+
             <Plane
-                args={[30, 30]}
+                args={[planeSize, planeSize]}
                 rotation={[-Math.PI / 2, 0, 0]}
                 receiveShadow
             >
@@ -83,5 +158,5 @@ export function Scene() {
                 castShadow
             />
         </>
-    );
+    )
 }
